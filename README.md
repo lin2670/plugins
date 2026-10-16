@@ -30,6 +30,10 @@ subscription and makes its requests. The packages work in OpenCode and in
 | [zcode](packages/zcode) | ZCode: Z.ai / BigModel (智谱) GLM Coding Plan, team seats, Start Plan | `zcode` |
 | [zed](packages/zed) | Zed (Pro, Pro Trial, Student, Business): Anthropic, OpenAI, Google and xAI models hosted by Zed | `zed` |
 | [zen-free](packages/zen-free) | OpenCode Zen free models with the public credential | `opencode-zen-free` |
+| [magpie-autoclaw-cn-auth](https://www.npmjs.com/package/magpie-autoclaw-cn-auth) | AutoClaw CN (Zhipu's autoglm acceleration API), with SMS sign-in — external package | `autoclaw` |
+| [magpie-catpaw-auth](https://www.npmjs.com/package/magpie-catpaw-auth) | Meituan's 妙手 CatPaw (ai.catpaw.meituan.com), with the desktop client's saved credentials — external package | `catpaw` |
+| [magpie-loomy-auth](https://www.npmjs.com/package/magpie-loomy-auth) | iFlytek's Loomy (loomyad.xunfei.cn), with SMS sign-in — external package | `loomy` |
+| [magpie-raccoon-auth](https://www.npmjs.com/package/magpie-raccoon-auth) | SenseTime's 小浣熊 Raccoon (xiaohuanxiong.com), with SMS sign-in — external package | `raccoon` |
 
 ## Gateway middleware
 
