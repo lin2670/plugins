@@ -27,6 +27,7 @@ export function fakeLoomy() {
     logins: 0,
     chatCalls: [],
     firstLoginCalls: 0,
+    dailyBalance: 3000, // the day's first first-login refreshes it to 5000
     recordsReads: 0,
     modelsReads: 0,
     // onboarding: done[key]=true once its complete call lands (idempotent)
@@ -38,6 +39,7 @@ export function fakeLoomy() {
       state.logins = 0
       state.chatCalls = []
       state.firstLoginCalls = 0
+      state.dailyBalance = 3000
       state.recordsReads = 0
       state.modelsReads = 0
       state.onboardingDone = {}
@@ -133,12 +135,15 @@ export function fakeLoomy() {
 
       if (url.pathname === "/api/v1/points/first-login") {
         state.firstLoginCalls++
-        return json(200, { code: OK, desc: "ok", data: { dailyBalance: 5000 } })
+        // the vendor's own semantics: the day's first call refreshes the
+        // daily wallet (up), a repeat answers success with no change (flat)
+        if (state.firstLoginCalls === 1) state.dailyBalance = 5000
+        return json(200, { code: OK, desc: "ok", data: { dailyBalance: state.dailyBalance } })
       }
 
       if (url.pathname === "/api/v2/points/records") {
         state.recordsReads++
-        return json(200, { code: OK, desc: "ok", data: { balance: 5000, dailyBalance: 5000, dailyLimitPoints: 5000, dailyRemainingPoints: 5000, list: [], total: 0 } })
+        return json(200, { code: OK, desc: "ok", data: { balance: 5000, dailyBalance: state.dailyBalance, dailyLimitPoints: 5000, dailyRemainingPoints: state.dailyBalance, list: [], total: 0 } })
       }
 
       // onboarding: the task status table and the per-key completion report

@@ -18,6 +18,11 @@ const env = (name, fallback) => {
   return v ? v.replace(/\/+$/, "") : fallback
 }
 const integrationBase = () => env("LOOMY_POINTS_BASE_URL", "https://loomyad.xunfei.cn")
+// the account host is the Loomy client's own CAccount domain: it comes from
+// the install package's encrypted .env.prod (VITE_XFYUN_BASE_URL, unpacked
+// from app.asar with the client's own env-file-crypto.js) — xfinfr.com is
+// xfyun's account infrastructure, not a third-party host (reference
+// endpoints.rs, itself sourced from the installed client)
 const xfyunBase = () => env("LOOMY_XFYUN_BASE_URL", "https://account.xfinfr.com")
 const accessKeyId = () => env("LOOMY_XFYUN_ACCESS_KEY_ID", "2thryby66wxi53sk")
 const accessKeySecret = () => env("LOOMY_XFYUN_ACCESS_KEY_SECRET", "zsak6eadrbawz683wf5r3m2snrwj868r")
@@ -395,10 +400,15 @@ export async function LoomyAuthPlugin({ client } = {}) {
           const payload = await tokenRequest("GET", "/api/v2/points/records?pageNo=1&pageSize=1&direction=debit&granularity=chat", a.access)
           const code = codeOf(payload)
           if (AUTH_CODES.has(code)) return { error: "Loomy 登录态已失效，请重新登录", signIn: "expired" }
-          if (code !== OK) return { error: `积分查询失败：${messageOf(payload) || `code=${code}`}` }
+          if (code !== OK) return { error: `积分查询失败：${messageOf(payload) || `code=${code}`}`, signIn: "kept" }
           const data = payload?.data?.data ?? payload?.data ?? {}
-          const daily = toNum(data.dailyBalance) ?? 0
-          const permanent = toNum(data.balance) ?? 0
+          const daily = toNum(data.dailyBalance)
+          const permanent = toNum(data.balance)
+          // this endpoint is a records list, so a reply without the balance
+          // fields is a realistic case — "unknown" must not read as a
+          // confident zero
+          if (daily == null && permanent == null)
+            return { error: `积分响应没有返回余额字段（${JSON.stringify(data).slice(0, 120)}）`, signIn: "kept" }
           // the daily wallet from the vendor's own numbers: spent is
           // dailyLimitPoints - dailyRemainingPoints. When the pair is absent
           // the wallet is an amount with no limit — a made-up limit would
@@ -409,9 +419,10 @@ export async function LoomyAuthPlugin({ client } = {}) {
             dailyLimit != null && dailyRemaining != null
               ? { name: "每日赠送积分", used: Math.max(0, dailyLimit - dailyRemaining), amount: dailyRemaining, limit: dailyLimit, unit: "credits", resetsAt: beijingMidnight(), span: 86400 }
               : { name: "每日赠送积分", used: 0, display: `${daily} credits`, aside: true }
+          // only the wallets whose numbers came back; a missing one is not 0
           const windows = [
-            dailyWallet,
-            { name: "永久积分", used: 0, display: `${permanent} credits`, aside: true },
+            ...(daily != null ? [dailyWallet] : []),
+            ...(permanent != null ? [{ name: "永久积分", used: 0, display: `${permanent} credits`, aside: true }] : []),
           ]
           // no `signIn` on a clean read: that absence is how magpie takes an
           // expired mark back off the account (Loomy has no renewal, so a
@@ -423,10 +434,27 @@ export async function LoomyAuthPlugin({ client } = {}) {
       },
       // the daily grant: the first login of the vendor's day refreshes the
       // daily wallet; the same call pressed here keeps it refreshed for an
-      // account that isn't logging in (agent2api checkin.rs)
+      // account that isn't logging in (agent2api checkin.rs). The endpoint
+      // answers success whether it granted or not, so claimed vs done is
+      // decided by the daily balance around the call: up means the day's
+      // grant landed, flat means it was already in (or carries no daily
+      // wallet) — "done", with the refreshed balance in the message either way
       async checkin(getAuth) {
         const a = await getAuth()
         if (a?.type !== "oauth" || !a.access) throw new SignedOut("Loomy：未登录")
+        const readDaily = async () => {
+          const rec = await tokenRequest("GET", "/api/v2/points/records?pageNo=1&pageSize=1&direction=debit&granularity=chat", a.access)
+          return toNum(rec?.data?.data?.dailyBalance ?? rec?.data?.dailyBalance)
+        }
+        let before
+        try {
+          before = await readDaily()
+        } catch (e) {
+          if (e?.signIn === "expired" || e instanceof SignedOut) throw expired("Loomy 登录态已失效，无法刷新每日积分（请重新登录）")
+          // the pre-read failing does not stop the grant call: report without
+          // a claimed/done verdict rather than not pressing it at all
+          before = null
+        }
         let payload
         try {
           payload = await tokenRequest("POST", "/api/v1/points/first-login", a.access, {})
@@ -437,22 +465,19 @@ export async function LoomyAuthPlugin({ client } = {}) {
         const code = codeOf(payload)
         if (AUTH_CODES.has(code)) throw expired("Loomy 登录态已失效，无法刷新每日积分（请重新登录）")
         if (code !== OK) return { outcome: "failed", message: `每日积分刷新失败：${messageOf(payload) || `code=${code}`}` }
-        // no "amount earned" field exists on this endpoint: dailyBalance is
-        // the refreshed *balance after*, not the grant (the reference reads
-        // it only as a display hint) — so no credit is claimed
-        const daily = toNum(payload?.data?.dailyBalance ?? payload?.data?.data?.dailyBalance)
-        return {
-          outcome: "claimed",
-          message: daily != null ? `每日赠送积分已刷新（当前 ${daily}）` : "每日赠送积分已刷新",
-        }
+        const after = toNum(payload?.data?.dailyBalance ?? payload?.data?.data?.dailyBalance) ?? (await readDaily().catch(() => null))
+        const dailyMsg = after != null ? `每日赠送积分已刷新（当前 ${after}）` : "每日赠送积分已刷新"
+        if (before != null && after != null && after > before) return { outcome: "claimed", credit: after - before, message: `${dailyMsg}；今日首登奖励 +${after - before}` }
+        return { outcome: "done", message: dailyMsg }
       },
       methods,
     },
     async config(config) {
       config.provider ??= {}
       const was = config.provider[ID] ?? {}
-      // no static list: Loomy's model gateway has no shipped fallback
-      // (agent2api models.rs), so the models hook fills it once signed in
+      // the static table (captured from the live endpoint) keeps the picker
+      // usable before the first sign-in; the models hook extends it from
+      // /api/v1/models once signed in
       config.provider[ID] = {
         name: NAME,
         npm: "@ai-sdk/openai-compatible",

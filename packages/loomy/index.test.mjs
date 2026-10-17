@@ -135,13 +135,19 @@ describe("chat", () => {
 })
 
 describe("checkin", () => {
-  test("first-login is pressed and the daily balance reported", async () => {
+  test("the day's first call claims the grant, a repeat is done", async () => {
+    // the daily wallet moves 3000 → 5000 on the day's first call: claimed
     const result = await plugin.auth.checkin(getAuth)
     expect(result.outcome).toBe("claimed")
-    // dailyBalance is the refreshed balance, not a grant amount: no credit
-    expect(result.credit).toBeUndefined()
+    expect(result.credit).toBe(2000)
     expect(result.message).toContain("5000")
     expect(fake.state.firstLoginCalls).toBe(1)
+    // the endpoint answers success on a repeat too, but the wallet is flat:
+    // done, not a second claim
+    const again = await plugin.auth.checkin(getAuth)
+    expect(again.outcome).toBe("done")
+    expect(again.credit).toBeUndefined()
+    expect(fake.state.firstLoginCalls).toBe(2)
   })
 
   test("a refused session says the sign-in expired", async () => {
@@ -174,8 +180,7 @@ describe("usage", () => {
     const daily = usage.windows.find((w) => w.name === "每日赠送积分")
     // the vendor's own numbers: spent = dailyLimitPoints - dailyRemainingPoints
     expect(daily.limit).toBe(5000)
-    expect(daily.used).toBe(0)
-    expect(daily.amount).toBe(5000)
+    expect(daily.amount).toBe(fake.state.dailyBalance)
     expect(daily.resetsAt).toBeGreaterThan(Date.now())
     const permanent = usage.windows.find((w) => w.name === "永久积分")
     expect(permanent.display).toBe("5000 credits")
@@ -194,6 +199,19 @@ describe("usage", () => {
       const daily = usage.windows.find((w) => w.name === "每日赠送积分")
       expect(daily.limit).toBeUndefined()
       expect(daily.display).toBe("3000 credits")
+      // a reply with neither balance field is an error, not a confident zero
+      globalThis.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : String(input?.url ?? input)
+        if (String(url).includes("/api/v2/points/records"))
+          return new Response(JSON.stringify({ code: "000000", desc: "ok", data: { records: [] } }), { status: 200 })
+        return realFetch(input, init)
+      }
+      try {
+        const missing = await plugin.auth.usage(getAuth)
+        expect(missing.error).toContain("没有返回余额字段")
+      } finally {
+        globalThis.fetch = realFetch
+      }
     } finally {
       globalThis.fetch = realFetch
     }
