@@ -80,9 +80,12 @@ describe("sign-in methods", () => {
     expect(result.uid).toBe("u1")
   })
 
-  test("manual paste works", async () => {
+  test("manual paste works through the host's authorize → callback contract", async () => {
     const method = plugin.auth.methods.find((m) => m.label.includes("Paste"))
-    const result = await method.authorize({ token: "pasted-token" })
+    const flow = await method.authorize({ token: "pasted-token" })
+    expect(flow.method).toBe("auto")
+    expect(typeof flow.callback).toBe("function")
+    const result = await flow.callback()
     expect(result.type).toBe("success")
     expect(result.access).toBe("pasted-token")
     expect(await method.authorize({ token: "" })).toMatchObject({ type: "failed" })
@@ -396,11 +399,10 @@ describe("captured protocol", () => {
     })
     const sent = fake.state.conversations[0]
     expect(sent.permissionMode).toBe(capturedRound.bodyProtocol.permissionMode)
-    // the capture is the client's CLI session (CatPawCLI / CLI); this plugin
-    // speaks the CATX_APP shape the client's app mode uses — same protocol,
-    // same permissionMode, a different entry door
-    expect(sent.source).toBe("CatX")
-    expect(sent.mode).toBe("CATX_APP")
+    // one client identity end to end: the body's source/mode are the same
+    // captured request's values as the headers are
+    expect(sent.source).toBe(capturedRound.bodyProtocol.source)
+    expect(sent.mode).toBe(capturedRound.bodyProtocol.mode)
   })
 
   test("the captured turn request carries the same permissionMode", () => {

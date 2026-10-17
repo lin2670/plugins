@@ -83,7 +83,7 @@ export function fakeCatPaw() {
 
       if (url.pathname === "/api/agent/conversation/round") {
         state.rounds++
-        if (body.source !== "CatX" || body.mode !== "CATX_APP") return json(400, { code: 400, msg: `source/mode wrong: ${body.source}/${body.mode}` })
+        if (body.source !== "CatPawCLI" || body.mode !== "CLI") return json(400, { code: 400, msg: `source/mode wrong: ${body.source}/${body.mode}` })
         state.conversations.push({ id: body.conversationId, modelType: body.modelType, prompt: body.message?.content?.[0]?.text ?? "", token: (req.headers.get("cookie") ?? "").match(/X-Passport-Token=([^;]+)/)?.[1] ?? "", permissionMode: body.permissionMode, source: body.source, mode: body.mode })
         return json(200, { code: 0, data: { conversationId: body.conversationId } })
       }

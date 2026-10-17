@@ -186,8 +186,11 @@ async function* runConversation(token, chat, signal) {
       conversationId: convId,
       message: { type: "user", messageId: msgId, content: [{ type: "text", text: prompt }], finished: true },
       modelType,
-      source: "CatX",
-      mode: "CATX_APP",
+      // the client's own round body (testdata/captured-round.json): CLI
+      // identity end to end — these source/mode values ride the same
+      // captured request as the CLI headers gatewayHeaders sends
+      source: "CatPawCLI",
+      mode: "CLI",
       // the client's own round/turn bodies carry this exact value (captured
       // 2026-10-09, both requests) — the client's default, not ours
       permissionMode: "unsafeBypassPermissions",
@@ -219,8 +222,9 @@ async function* runConversation(token, chat, signal) {
     turnRequestId: turnId,
     message: { type: "user", messageId: msgId, content: [{ type: "text", text: prompt }], finished: true },
     modelType,
-    source: "CatX",
-    mode: "CATX_APP",
+    // the client's own turn body (testdata/captured-turn.json): CLI identity
+    source: "CatPawCLI",
+    mode: "CLI",
     // the client's own round/turn bodies carry this exact value (captured
     // 2026-10-09, both requests) — the client's default, not ours
     permissionMode: "unsafeBypassPermissions",
@@ -421,7 +425,8 @@ export async function CatPawAuthPlugin({ client } = {}) {
                 created,
                 model,
                 choices: [{ index: 0, message: { role: "assistant", content: text, ...(reasoning ? { reasoning_content: reasoning } : {}) }, finish_reason: "stop" }],
-                usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                // no usage block: the conversation protocol returns no token
+                // counts, and zeros would read as real ones
               }),
               { status: 200, headers: { "content-type": "application/json" } },
             )
@@ -477,7 +482,7 @@ export async function CatPawAuthPlugin({ client } = {}) {
         if (!data || typeof data !== "object") return { error: "妙手余额响应缺少 data", signIn: "kept" }
         const credit = data.availableCredits ?? data.credit ?? data.balance ?? data.available
         const plan = data.userPlan ?? {}
-        if (credit == null) return { error: `余额接口没有返回积分数额（${JSON.stringify(data).slice(0, 120)}）` }
+        if (credit == null) return { error: `余额接口没有返回积分数额（${JSON.stringify(data).slice(0, 120)}）`, signIn: "kept" }
         // no `signIn` on a clean read: magpie reads that as "the sign-in is
         // fine" and takes the expired mark back off the account. Saying
         // "kept" here instead would leave a lapse — this read's or an
@@ -591,10 +596,19 @@ export async function CatPawAuthPlugin({ client } = {}) {
           type: "oauth",
           label: "手动粘贴 token（Paste token）",
           prompts: [{ type: "text", key: "token", message: "accessToken（X-Passport-Token 的值）", validate: (v) => (v && v.trim() ? undefined : "必填") }],
+          // an oauth authorize() hands back {url, method, instructions,
+          // callback} and the host finishes the sign-in by calling
+          // callback() — returning the account directly leaves the host
+          // waiting on a callback that doesn't exist
           authorize: async (inputs) => {
             const token = String(inputs?.token ?? "").trim()
             if (!token) return { type: "failed", error: "token 必填" }
-            return { type: "success", refresh: "", access: token, expires: 0, accountId: "手动粘贴", source: "manual" }
+            return {
+              url: "",
+              instructions: "已取到粘贴的 token，确认即完成登录。",
+              method: "auto",
+              callback: async () => ({ type: "success", refresh: "", access: token, expires: 0, accountId: "手动粘贴", source: "manual" }),
+            }
           },
         },
       ],
