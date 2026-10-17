@@ -2,7 +2,7 @@
 
 [OpenCode](https://opencode.ai) / [magpie](https://usemagpie.ai) provider 插件：**妙手（CatPaw，美团 `ai.catpaw.meituan.com`）**——登录、模型清单、聊天转发、余额查询。
 
-请求形态按妙手桌面客户端 2026-10-09 的真实抓包移植（`round → event(running) → turn(SSE)` 简化链路，无跨请求会话复用）：请求头、`permissionMode`、`source`/`mode` 均为客户端原样取值。
+请求形态按妙手桌面客户端 2026-10-09 的真实抓包移植（`round → event(running) → turn(SSE)` 简化链路，无跨请求会话复用）：请求头、`permissionMode` 均为客户端原样取值，脱敏抓包存于 `testdata/captured-*.json`，测试逐键比对。
 
 ## 安装
 
