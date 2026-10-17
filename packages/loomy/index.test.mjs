@@ -51,11 +51,15 @@ describe("sign-in methods", () => {
     expect(fake.state.smsSent).toBeNull()
   })
 
-  test("manual paste works", async () => {
+  test("manual paste works through the host's authorize → callback contract", async () => {
     const method = plugin.auth.methods.find((m) => m.label.includes("Paste"))
-    const result = await method.authorize({ session: "pasted" })
+    const flow = await method.authorize({ session: "pasted" })
+    expect(flow.method).toBe("auto")
+    expect(typeof flow.callback).toBe("function")
+    const result = await flow.callback()
     expect(result.type).toBe("success")
     expect(result.access).toBe("pasted")
+    expect(await method.authorize({ session: "" })).toMatchObject({ type: "failed" })
   })
 })
 
@@ -154,6 +158,24 @@ describe("checkin", () => {
     saved = { type: "oauth", access: "gone", expires: 0 }
     await expect(plugin.auth.checkin(getAuth)).rejects.toThrow(/失效/)
   })
+
+  test("a failed pre-read is failed, not silently done", async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : String(input?.url ?? input)
+      // fail only the records read; the first-login POST still goes through
+      if (String(url).includes("/api/v2/points/records")) return new Response("boom", { status: 502 })
+      return realFetch(input, init)
+    }
+    try {
+      const result = await plugin.auth.checkin(getAuth)
+      expect(result.outcome).toBe("failed")
+      expect(result.message).toContain("无法读取签到前余额")
+      expect(fake.state.firstLoginCalls).toBe(0)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
 })
 
 describe("models", () => {
@@ -199,6 +221,25 @@ describe("usage", () => {
       const daily = usage.windows.find((w) => w.name === "每日赠送积分")
       expect(daily.limit).toBeUndefined()
       expect(daily.display).toBe("3000 credits")
+      // a reply with only the limit/remaining pair still shows the daily
+      // wallet (remaining IS its number), without dailyBalance
+      globalThis.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : String(input?.url ?? input)
+        if (String(url).includes("/api/v2/points/records"))
+          return new Response(JSON.stringify({ code: "000000", desc: "ok", data: { dailyLimitPoints: 5000, dailyRemainingPoints: 4200, list: [] } }), { status: 200 })
+        return realFetch(input, init)
+      }
+      try {
+        const pairOnly = await plugin.auth.usage(getAuth)
+        const dw = pairOnly.windows.find((w) => w.name === "每日赠送积分")
+        expect(dw).toBeTruthy()
+        expect(dw.used).toBe(800)
+        expect(dw.amount).toBe(4200)
+        expect(dw.limit).toBe(5000)
+        expect(pairOnly.windows.find((w) => w.name === "永久积分")).toBeUndefined()
+      } finally {
+        globalThis.fetch = realFetch
+      }
       // a reply with neither balance field is an error, not a confident zero
       globalThis.fetch = (input, init) => {
         const url = typeof input === "string" ? input : String(input?.url ?? input)

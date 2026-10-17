@@ -330,10 +330,18 @@ export async function LoomyAuthPlugin({ client } = {}) {
     type: "oauth",
     label: "手动粘贴 session（Paste token）",
     prompts: [{ type: "text", key: "session", message: "session（token 头的值，14 天有效）", validate: (v) => (v && v.trim() ? undefined : "必填") }],
+    // an oauth authorize() hands back {url, method, instructions, callback}
+    // and the host finishes the sign-in by calling callback() — returning
+    // the account directly leaves the host on a callback that doesn't exist
     authorize: async (inputs) => {
       const session = String(inputs?.session ?? "").trim()
       if (!session) return { type: "failed", error: "session 必填" }
-      return { type: "success", refresh: "", access: session, expires: 0, accountId: "手动粘贴", source: "manual" }
+      return {
+        url: "",
+        instructions: "已取到粘贴的 session，确认即完成登录。",
+        method: "auto",
+        callback: async () => ({ type: "success", refresh: "", access: session, expires: 0, accountId: "手动粘贴", source: "manual" }),
+      }
     },
   })
 
@@ -407,7 +415,8 @@ export async function LoomyAuthPlugin({ client } = {}) {
           // this endpoint is a records list, so a reply without the balance
           // fields is a realistic case — "unknown" must not read as a
           // confident zero
-          if (daily == null && permanent == null)
+          const pairPresent = toNum(data.dailyLimitPoints) != null && toNum(data.dailyRemainingPoints) != null
+          if (daily == null && permanent == null && !pairPresent)
             return { error: `积分响应没有返回余额字段（${JSON.stringify(data).slice(0, 120)}）`, signIn: "kept" }
           // the daily wallet from the vendor's own numbers: spent is
           // dailyLimitPoints - dailyRemainingPoints. When the pair is absent
@@ -415,13 +424,19 @@ export async function LoomyAuthPlugin({ client } = {}) {
           // always read as full
           const dailyLimit = toNum(data.dailyLimitPoints)
           const dailyRemaining = toNum(data.dailyRemainingPoints)
+
+          // the daily wallet shows from whichever numbers came back: the
+          // limit/remaining pair alone is enough (remaining IS its number);
+          // with only dailyBalance it is an amount without a limit; with
+          // neither, no daily wallet at all — a missing one is not 0
           const dailyWallet =
             dailyLimit != null && dailyRemaining != null
               ? { name: "每日赠送积分", used: Math.max(0, dailyLimit - dailyRemaining), amount: dailyRemaining, limit: dailyLimit, unit: "credits", resetsAt: beijingMidnight(), span: 86400 }
-              : { name: "每日赠送积分", used: 0, display: `${daily} credits`, aside: true }
-          // only the wallets whose numbers came back; a missing one is not 0
+              : daily != null
+                ? { name: "每日赠送积分", used: 0, display: `${daily} credits`, aside: true }
+                : null
           const windows = [
-            ...(daily != null ? [dailyWallet] : []),
+            ...(dailyWallet ? [dailyWallet] : []),
             ...(permanent != null ? [{ name: "永久积分", used: 0, display: `${permanent} credits`, aside: true }] : []),
           ]
           // no `signIn` on a clean read: that absence is how magpie takes an
@@ -451,9 +466,9 @@ export async function LoomyAuthPlugin({ client } = {}) {
           before = await readDaily()
         } catch (e) {
           if (e?.signIn === "expired" || e instanceof SignedOut) throw expired("Loomy 登录态已失效，无法刷新每日积分（请重新登录）")
-          // the pre-read failing does not stop the grant call: report without
-          // a claimed/done verdict rather than not pressing it at all
-          before = null
+          // without the pre-read there is no honest claimed/done verdict —
+          // say failed with the reason rather than "already done"
+          return { outcome: "failed", message: `无法读取签到前余额，未执行每日刷新：${e?.message ?? e}` }
         }
         let payload
         try {
