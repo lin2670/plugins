@@ -2,8 +2,11 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:tes
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { readFileSync } from "node:fs"
 import { CatPawAuthPlugin, _internal } from "./index.mjs"
 import { fakeCatPaw } from "./fake.mjs"
+import capturedRound from "./testdata/captured-round.json"
+import capturedTurn from "./testdata/captured-turn.json"
 
 // every test runs against the fake upstream in fake.mjs: no network, no real
 // token ever leaves this process. The upstream base is monkey-patched because
@@ -222,6 +225,21 @@ describe("chat", () => {
     expect((await imgRes.json()).error.message).toContain("cannot take images")
   })
 
+  test("the OpenAI image shapes (image_url, input_image) are refused too", async () => {
+    const loader = await plugin.auth.loader(getAuth)
+    for (const type of ["image_url", "input_image"]) {
+      const res = await loader.fetch(`${fake.url}/api/agent/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify({
+          model: "longcat-2.0",
+          messages: [{ role: "user", content: [{ type: "text", text: "看这张图" }, { type, image_url: { url: "https://example.com/x.png" } }] }],
+        }),
+      })
+      expect(res.status).toBe(400)
+      expect((await res.json()).error.message).toContain("cannot take images")
+    }
+  })
+
   test("unknown model is rejected", async () => {
     const loader = await plugin.auth.loader(getAuth)
     const res = await loader.fetch("https://ai.catpaw.meituan.com/v1/chat/completions", {
@@ -229,6 +247,58 @@ describe("chat", () => {
       body: JSON.stringify({ model: "not-a-model", stream: false, messages: [{ role: "user", content: "hi" }] }),
     })
     expect(res.status).toBe(400)
+  })
+
+  test("a web sign-in spends its own token, without any auth.json on the machine", async () => {
+    // the desktop file moves away entirely: the web sign-in must not need it
+    const was = process.env.CATPAW_AUTH_PATH
+    process.env.CATPAW_AUTH_PATH = join(tmpDir, "absent-web-test.json")
+    // sign in through the web flow itself: the sid is claimed, poll-token
+    // hands out its token, and that account is what chats
+    const webMethod = plugin.auth.methods.find((m) => m.label.includes("Web sign-in"))
+    const flow = await webMethod.authorize()
+    const sid = new URL(flow.url).searchParams.get("sid")
+    fake.state.webSids.set(sid, "web-tok-1")
+    const signedIn = await flow.callback()
+    expect(signedIn.type).toBe("success")
+    saved = { type: "oauth", access: signedIn.access, refresh: "", expires: 0, accountId: signedIn.accountId, name: signedIn.accountId, source: "web" }
+    try {
+      const loader = await plugin.auth.loader(getAuth)
+      const res = await loader.fetch("https://ai.catpaw.meituan.com/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "longcat-2.0", stream: false, messages: [{ role: "user", content: "hi" }] }),
+      })
+      expect(res.status).toBe(200)
+      // the request went out under the web account's token, not the
+      // desktop file's, and the card shows the web account's name
+      expect(fake.state.conversations[0].token).toBe("web-tok-1")
+      // the conversation body fields are the client's captured protocol
+      expect(fake.state.conversations[0].permissionMode).toBe(capturedRound.bodyProtocol.permissionMode)
+      const usage = await plugin.auth.usage(getAuth)
+      expect(usage.error).toBeUndefined()
+      expect(usage.user).toBe("网页用户")
+      expect(usage.windows[0].display).toContain("credit")
+    } finally {
+      process.env.CATPAW_AUTH_PATH = was
+    }
+  })
+
+  test("the desktop account and a web account never cross: A's request is not spent on B", async () => {
+    // the desktop file holds the fake's own token; account A signed in on
+    // the web with a different one — A's chat must carry A's token
+    const webMethod = plugin.auth.methods.find((m) => m.label.includes("Web sign-in"))
+    const flow = await webMethod.authorize()
+    const sid = new URL(flow.url).searchParams.get("sid")
+    fake.state.webSids.set(sid, "acct-A-token")
+    const signedIn = await flow.callback()
+    expect(signedIn.type).toBe("success")
+    saved = { type: "oauth", access: signedIn.access, refresh: "", expires: 0, accountId: signedIn.accountId, name: signedIn.accountId, source: "web" }
+    const loader = await plugin.auth.loader(getAuth)
+    await loader.fetch("https://ai.catpaw.meituan.com/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "longcat-2.0", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    })
+    expect(fake.state.conversations[0].token).toBe("acct-A-token")
   })
 
   test("a refused token says 401", async () => {
@@ -281,6 +351,61 @@ describe("usage", () => {
     } finally {
       process.env.CATPAW_AUTH_PATH = was
     }
+  })
+})
+
+describe("captured protocol", () => {
+  test("gatewayHeaders matches the captured client headers key for key", () => {
+    // _internal doesn't expose gatewayHeaders directly; build one through
+    // the only place its shape is fully visible — reconstruct from source is
+    // fragile, so compare against the exported header set instead
+    const captured = capturedRound.headers
+    const ours = _internal.gatewayHeadersForTest("tok")
+    // every header the client sent, our request sends too — with the same
+    // value where the value is a constant, and the same shape where it is
+    // per-request random (the trace ids)
+    // the base set (what gatewayHeaders returns) plus what fetch adds and
+    // what the round route's extraHeaders carry — together they must cover
+    // every header the client sent
+    const roundExtras = { "m-spanid": "0.2", "m-spanname": "conversation.round" }
+    const combined = { accept: "application/json, text/plain, */*", ...ours, ...roundExtras }
+    for (const [key, value] of Object.entries(captured)) {
+      const lower = key.toLowerCase()
+      if (lower === "m-host") {
+        // the client machine's LAN IP: deliberately not sent (see index.mjs)
+        expect(ours).not.toHaveProperty("m-host")
+        continue
+      }
+      if (["accept-encoding", "content-length"].includes(lower)) continue // transport-level
+      const oursKey = Object.keys(combined).find((k) => k.toLowerCase() === lower)
+      expect(oursKey, key).toBeTruthy()
+      if (["m-traceid", "x-request-id", "x-trace-id"].includes(lower)) {
+        expect(String(combined[key])).toMatch(/^[0-9a-f-]{32,36}$/)
+      } else {
+        expect(String(combined[oursKey]), key).toBe(String(value))
+      }
+    }
+    expect(ours["m-traceid"]).toBe(ours["x-trace-id"])
+  })
+
+  test("the round body carries the captured protocol fields", async () => {
+    const loader = await plugin.auth.loader(getAuth)
+    await loader.fetch("https://ai.catpaw.meituan.com/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "longcat-2.0", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    })
+    const sent = fake.state.conversations[0]
+    expect(sent.permissionMode).toBe(capturedRound.bodyProtocol.permissionMode)
+    // the capture is the client's CLI session (CatPawCLI / CLI); this plugin
+    // speaks the CATX_APP shape the client's app mode uses — same protocol,
+    // same permissionMode, a different entry door
+    expect(sent.source).toBe("CatX")
+    expect(sent.mode).toBe("CATX_APP")
+  })
+
+  test("the captured turn request carries the same permissionMode", () => {
+    expect(capturedTurn.bodyProtocol.permissionMode).toBe(capturedRound.bodyProtocol.permissionMode)
+    expect(capturedRound.headers["user-agent"]).toBe(capturedTurn.headers["user-agent"])
   })
 })
 

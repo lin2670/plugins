@@ -1,12 +1,14 @@
 // @magpie-community/opencode-catpaw-auth — the 妙手 (CatPaw, Meituan)
 // provider plugin for OpenCode and magpie.
 //
-// Signs in with the CatPaw desktop client's saved credentials, then runs each
-// chat completion through its conversation protocol: round → event(running)
-// → turn(SSE). The SSE frames are cumulative, so each is diffed against the
-// last to make OpenAI deltas. v1 is the verified simple chain ported from
-// catpaw-proxy.mjs (2026-10-09); conversation reuse and tool continuation
-// are phase 2 (see the repo's ADR-0003).
+// Signs in with a browser web login or the CatPaw desktop client's saved
+// credentials, then runs each chat completion through its conversation
+// protocol: round → event(running) → turn(SSE). The SSE frames are
+// cumulative, so each is diffed against the last to make OpenAI deltas.
+// The request shapes are the desktop client's own, captured 2026-10-09
+// (testdata/captured-*.json; the simplified chain was first verified in
+// catpaw-proxy.mjs the same day); conversation reuse and tool continuation
+// are phase 2.
 
 const ID = "catpaw"
 const NAME = "妙手 CatPaw"
@@ -333,16 +335,23 @@ export async function CatPawAuthPlugin({ client } = {}) {
               return errorResponse(400, "this provider cannot run tools: the conversation protocol takes one flattened text prompt, so tool definitions would be silently dropped (refused rather than answered wrongly)")
             if (chat.messages.some((m) => m.role === "tool" || (Array.isArray(m.content) && m.content.some((c) => c?.type === "tool_call" || c?.type === "tool_use" || c?.type === "tool_result"))))
               return errorResponse(400, "this provider cannot continue a tool call: the conversation protocol takes one flattened text prompt, so tool results would be silently dropped (refused rather than answered wrongly)")
-            if (chat.messages.some((m) => Array.isArray(m.content) && m.content.some((c) => c?.type === "image" || (typeof c?.text === "string" && c.text.startsWith("data:image/")))))
+            // image_url is what @ai-sdk/openai-compatible actually sends
+            // ({"type":"image_url","image_url":{…}}); input_image is the
+            // responses-API shape some clients carry over
+            if (chat.messages.some((m) => Array.isArray(m.content) && m.content.some((c) => c?.type === "image" || c?.type === "image_url" || c?.type === "input_image" || (typeof c?.text === "string" && c.text.startsWith("data:image/")))))
               return errorResponse(400, "this provider cannot take images through the text-only conversation prompt (refused rather than silently dropped)")
 
-            // the token: the desktop client's file, or the pasted one
+            // the token: only the desktop method's credentials live in the
+            // client's auth.json — a web sign-in or a paste carries its own
+            // token in the account record, and a request made in account A's
+            // name must never be spent on whatever account the desktop app
+            // happens to hold
             let token
-            let accountName = "妙手桌面端账号"
+            let accountName
             const a = await getAuth()
-            if (a?.type === "oauth" && a.access && a.source === "manual") {
+            if (a?.type === "oauth" && a.access && a.source !== "desktop") {
               token = a.access
-              accountName = a.name || a.accountId || "手动粘贴"
+              accountName = a.name || a.accountId || (a.source === "web" ? "妙手网页登录" : "手动粘贴")
             } else {
               try {
                 const file = readAuth()
@@ -431,7 +440,9 @@ export async function CatPawAuthPlugin({ client } = {}) {
       async usage(getAuth) {
         const a = await getAuth()
         let token
-        if (a?.type === "oauth" && a.access && a.source === "manual") token = a.access
+        // same split as the loader: only the desktop method reads the
+        // client's auth.json; every stored account spends its own token
+        if (a?.type === "oauth" && a.access && a.source !== "desktop") token = a.access
         else {
           try {
             token = readAuth().token
@@ -466,14 +477,15 @@ export async function CatPawAuthPlugin({ client } = {}) {
         if (!data || typeof data !== "object") return { error: "妙手余额响应缺少 data", signIn: "kept" }
         const credit = data.availableCredits ?? data.credit ?? data.balance ?? data.available
         const plan = data.userPlan ?? {}
+        if (credit == null) return { error: `余额接口没有返回积分数额（${JSON.stringify(data).slice(0, 120)}）` }
         // no `signIn` on a clean read: magpie reads that as "the sign-in is
         // fine" and takes the expired mark back off the account. Saying
         // "kept" here instead would leave a lapse — this read's or an
         // earlier transient 401's — on the card until a manual re-login.
         return {
           plan: plan.planName || (plan.pro ? "妙手 CatPaw Pro" : NAME),
-          user: authAccount(),
-          windows: [{ name: "可用积分", used: 0, display: `${credit ?? "?"} credit`, aside: true }],
+          user: a?.type === "oauth" && a.source !== "desktop" ? a.name || a.accountId || "妙手网页登录" : authAccount(),
+          windows: [{ name: "可用积分", used: 0, display: `${credit} credit`, aside: true }],
         }
       },
       // CatPaw has no check-in (confirmed: no such activity in its client)
@@ -602,4 +614,4 @@ export async function CatPawAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { ID, NAME, MODELS, modelTypeOf, buildPrompt, gatewayHeaders, readAuth, authPath, configModel }
+export const _internal = { ID, NAME, MODELS, modelTypeOf, buildPrompt, gatewayHeaders, gatewayHeadersForTest: gatewayHeaders, readAuth, authPath, configModel }

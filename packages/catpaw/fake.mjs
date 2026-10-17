@@ -40,7 +40,7 @@ export function fakeCatPaw() {
       // here with the real body (401 / code 4010)
       if (url.pathname === "/api/gateway/credit/balance") {
         state.balanceCalls++
-        if (req.headers.get("x-auth-token") !== state.token) return json(401, { code: 4010, message: "Authentication token is required", data: null, errorCode: null })
+        if (req.headers.get("x-auth-token") !== state.token && !state.webTokens?.has(req.headers.get("x-auth-token"))) return json(401, { code: 4010, message: "Authentication token is required", data: null, errorCode: null })
         return json(200, {
           code: 0,
           message: "success",
@@ -74,7 +74,9 @@ export function fakeCatPaw() {
       }
 
       const token = (req.headers.get("cookie") ?? "").match(/X-Passport-Token=(.+)/)?.[1] ?? ""
-      if (token !== state.token) return json(401, { code: 401, msg: "token refused" })
+      // any valid login state passes: the desktop file's, and any token the
+      // web sign-in handed out (the real vendor accepts both alike)
+      if (token !== state.token && !state.webTokens?.has(token)) return json(401, { code: 401, msg: "token refused" })
       if (req.headers.get("m-appkey") !== "com.sankuai.mcopilot.cli") return json(400, { code: 400, msg: "m-appkey missing" })
 
       const body = await req.json().catch(() => ({}))
@@ -82,7 +84,7 @@ export function fakeCatPaw() {
       if (url.pathname === "/api/agent/conversation/round") {
         state.rounds++
         if (body.source !== "CatX" || body.mode !== "CATX_APP") return json(400, { code: 400, msg: `source/mode wrong: ${body.source}/${body.mode}` })
-        state.conversations.push({ id: body.conversationId, modelType: body.modelType, prompt: body.message?.content?.[0]?.text ?? "" })
+        state.conversations.push({ id: body.conversationId, modelType: body.modelType, prompt: body.message?.content?.[0]?.text ?? "", token: (req.headers.get("cookie") ?? "").match(/X-Passport-Token=([^;]+)/)?.[1] ?? "", permissionMode: body.permissionMode, source: body.source, mode: body.mode })
         return json(200, { code: 0, data: { conversationId: body.conversationId } })
       }
 
